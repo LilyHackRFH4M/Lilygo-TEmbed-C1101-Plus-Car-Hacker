@@ -1,0 +1,315 @@
+/****************************************************
+ *  CARJACKER — T-Embed C1101 Plus Edition
+ *  Arduino + TFT_eSPI port
+ *  Original author: You
+ *  Port author: ChatGPT
+ ****************************************************/
+
+#include <TFT_eSPI.h>
+#include <SPI.h>
+#include <math.h>
+
+// ─────────────────────────────────────────────────────────────
+// Display setup
+// ─────────────────────────────────────────────────────────────
+TFT_eSPI tft = TFT_eSPI();
+
+// 320×170 horizontal layout
+#define SCREEN_W 320
+#define SCREEN_H 170
+
+// ─────────────────────────────────────────────────────────────
+// BUTTONS — Preset 1
+// ─────────────────────────────────────────────────────────────
+#define BTN_OK     0
+#define BTN_BACK   14
+#define BTN_UP     3
+#define BTN_DOWN   2
+#define BTN_LEFT   1
+#define BTN_RIGHT  10
+
+bool readBtn(int pin) {
+    return digitalRead(pin) == LOW;   // T-Embed buttons are active-low
+}
+
+// ─────────────────────────────────────────────────────────────
+// Constants
+// ─────────────────────────────────────────────────────────────
+#define MAX_CARS 100
+#define HACKER_LINES 6
+#define SCAN_DURATION 60000
+#define POPUP_DURATION 3500
+#define MAX_PEEN 5
+
+// ─────────────────────────────────────────────────────────────
+// Car lists
+// ─────────────────────────────────────────────────────────────
+const char* high_end_cars[] = {
+    "Bugatti Chiron", "Lamborghini Huracan", "Ferrari SF90", "Porsche 918",
+    "Maserati MC20", "McLaren P1", "Aston Martin DBS", "Pagani Huayra",
+    "Bentley Continental", "Rolls Royce Ghost", "Koenigsegg Jesko",
+    "Lucid Air Sapphire", "Mercedes AMG GT", "Audi R8", "Tesla Roadster",
+    "Nissan GT-R Nismo", "Corvette Z06", "BMW i8", "Jaguar F-Type SVR", "Cadillac CT5-V"
+};
+
+const char* silly_cars[] = {
+    "Kia Rio", "Toyota Prius", "Rusty Tractor", "Shopping Cart", "Moped 50cc",
+    "Clown Car", "Golf Cart", "U-Haul Van", "Harley Davidson", "Amazon Drone",
+    "Skateboard", "Riding Lawn Mower", "Broken Hoverboard", "1998 Corolla",
+    "RC Car", "Segway", "Gas Tanker"
+};
+
+// ─────────────────────────────────────────────────────────────
+// Structures
+// ─────────────────────────────────────────────────────────────
+struct Peen {
+    float x, y;
+    float vx, vy;
+    float rotation;
+    float rotation_speed;
+    bool active;
+};
+
+struct App {
+    bool running;
+    bool scanning;
+    bool steal_mode;
+    bool show_popup;
+    bool peen_active;
+
+    uint32_t popup_start;
+    uint32_t scan_start;
+    uint32_t last_detect;
+
+    uint8_t scan_frame;
+    uint8_t popup_frame;
+
+    uint8_t car_count;
+    String cars[MAX_CARS];
+
+    uint8_t scroll;
+
+    Peen peen[MAX_PEEN];
+};
+
+App app;
+
+// ─────────────────────────────────────────────────────────────
+// DRAWING HELPERS
+// ─────────────────────────────────────────────────────────────
+
+void drawFrame() {
+    tft.drawRoundRect(2, 2, SCREEN_W-4, SCREEN_H-4, 6, TFT_WHITE);
+}
+
+void drawCentered(int y, const char* text, uint16_t color = TFT_WHITE, int size = 2) {
+    tft.setTextColor(color);
+    tft.setTextSize(size);
+    int16_t x = (SCREEN_W - tft.textWidth(text)) / 2;
+    tft.drawString(text, x, y);
+}
+
+// ─────────────────────────────────────────────────────────────
+// POPUP
+// ─────────────────────────────────────────────────────────────
+void drawPopup() {
+    tft.fillScreen(TFT_BLACK);
+
+    drawCentered(30, "ROCKETGOD", TFT_GREEN, 3);
+    drawCentered(60, "WAS HERE", TFT_GREEN, 3);
+    drawCentered(100, "betaskynet.com", TFT_CYAN, 2);
+
+    if((app.popup_frame / 10) % 2)
+        drawCentered(130, "[ ELITE HAX0R ]", TFT_YELLOW, 2);
+
+    app.popup_frame++;
+}
+
+// ─────────────────────────────────────────────────────────────
+// PEEN PHYSICS + DRAWING
+// ─────────────────────────────────────────────────────────────
+void initPeen() {
+    for (int i=0;i<MAX_PEEN;i++) {
+        app.peen[i].active = true;
+
+        app.peen[i].x = 40 + i*40;
+        app.peen[i].y = 40 + random(40);
+
+        float a = random(360) * 0.01745;
+        float s = 1 + random(100)/100.0;
+        app.peen[i].vx = cos(a)*s;
+        app.peen[i].vy = sin(a)*s;
+
+        app.peen[i].rotation = random(360)*0.01745;
+        app.peen[i].rotation_speed = (random(100)-50)/500.0;
+    }
+}
+
+void updatePeen() {
+    float gravity = 0.03;
+    float bounce = 0.85;
+
+    for(int i=0;i<MAX_PEEN;i++) {
+        Peen& p = app.peen[i];
+        if(!p.active) continue;
+
+        p.vy += gravity;
+
+        p.x += p.vx;
+        p.y += p.vy;
+
+        p.rotation += p.rotation_speed;
+
+        // Bounce walls
+        if(p.x < 10) { p.x = 10; p.vx = fabs(p.vx)*bounce; }
+        if(p.x > SCREEN_W-40) { p.x = SCREEN_W-40; p.vx = -fabs(p.vx)*bounce; }
+        if(p.y < 10) { p.y = 10; p.vy = fabs(p.vy)*bounce; }
+        if(p.y > SCREEN_H-40) { p.y = SCREEN_H-40; p.vy = -fabs(p.vy)*bounce; }
+
+        // Damp
+        p.vx *= 0.99;
+        p.vy *= 0.99;
+        p.rotation_speed *= 0.98;
+    }
+}
+
+// Draw a rotated "peen" — simplified for TFT speed
+void drawPeen(Peen& p) {
+    tft.fillCircle(p.x, p.y, 10, TFT_WHITE);
+}
+
+// ─────────────────────────────────────────────────────────────
+// MAIN SCENE
+// ─────────────────────────────────────────────────────────────
+void drawScanner() {
+    tft.fillScreen(TFT_BLACK);
+    drawFrame();
+
+    drawCentered(10, app.steal_mode ? "CAR STEAL MODE" : "CAR SCAN MODE", TFT_CYAN, 2);
+
+    if(app.car_count == 0 && !app.scanning) {
+        drawCentered(70, "Press OK to Scan", TFT_YELLOW, 2);
+    }
+
+    // Draw list
+    tft.setTextSize(2);
+    for(int i=0;i<5;i++) {
+        int idx = app.car_count - 1 - (app.scroll + i);
+        if(idx >= 0)
+            tft.drawString(app.cars[idx], 20, 40 + i*20);
+    }
+
+    // Scan animation
+    if(app.scanning) {
+        const char* frames[] = { "[>    ]","[=>   ]","[==>  ]","[===> ]",
+                                 "[====>]","[ <===]","[  <==]","[   <=]" };
+        drawCentered(140, frames[app.scan_frame%8], TFT_GREEN, 2);
+        app.scan_frame++;
+    }
+}
+
+// ─────────────────────────────────────────────────────────────
+// SETUP + LOOP
+// ─────────────────────────────────────────────────────────────
+void setup() {
+    Serial.begin(115200);
+    tft.init();
+    tft.setRotation(1);
+    tft.fillScreen(TFT_BLACK);
+
+    pinMode(BTN_OK, INPUT_PULLUP);
+    pinMode(BTN_BACK, INPUT_PULLUP);
+    pinMode(BTN_UP, INPUT_PULLUP);
+    pinMode(BTN_DOWN, INPUT_PULLUP);
+    pinMode(BTN_LEFT, INPUT_PULLUP);
+    pinMode(BTN_RIGHT, INPUT_PULLUP);
+
+    app.running = true;
+    app.show_popup = true;
+    app.popup_start = millis();
+}
+
+void loop() {
+
+    uint32_t now = millis();
+
+    // ─────────────────────────────────────────────────────────────
+    // POPUP
+    // ─────────────────────────────────────────────────────────────
+    if(app.show_popup) {
+        drawPopup();
+        if(now - app.popup_start > POPUP_DURATION) {
+            app.show_popup = false;
+        }
+        delay(50);
+        return;
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // PEEN FOUNTAIN MODE
+    // ─────────────────────────────────────────────────────────────
+    if(app.peen_active) {
+        tft.fillScreen(TFT_BLACK);
+
+        updatePeen();
+        for(int i=0;i<MAX_PEEN;i++)
+            if(app.peen[i].active) drawPeen(app.peen[i]);
+
+        if(readBtn(BTN_BACK))
+            app.peen_active = false;
+
+        delay(20);
+        return;
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // MAIN SCENE
+    // ─────────────────────────────────────────────────────────────
+    drawScanner();
+
+    // ─────────────────────────────────────────────────────────────
+    // BUTTONS
+    // ─────────────────────────────────────────────────────────────
+    if(readBtn(BTN_OK)) {
+        if(!app.scanning) {
+            app.scanning = true;
+            app.scan_start = now;
+            app.last_detect = now;
+        }
+    }
+
+    if(readBtn(BTN_BACK)) {
+        app.running = false;
+        ESP.restart();
+    }
+
+    if(readBtn(BTN_LEFT)) {
+        app.peen_active = true;
+        initPeen();
+    }
+
+    if(readBtn(BTN_RIGHT))
+        app.steal_mode = !app.steal_mode;
+
+    if(readBtn(BTN_UP) && app.scroll > 0)
+        app.scroll--;
+
+    if(readBtn(BTN_DOWN) && app.scroll + 5 < app.car_count)
+        app.scroll++;
+
+    // ─────────────────────────────────────────────────────────────
+    // SCANNER LOGIC
+    // ─────────────────────────────────────────────────────────────
+    if(app.scanning) {
+        if(now - app.last_detect > 2000) {  // every ~2 sec
+            bool high = (app.car_count == 0) || (random(3) > 0);
+            const char* name = high ?
+                high_end_cars[random(20)] :
+                silly_cars[random(17)];
+            app.cars[app.car_count++] = name;
+            app.last_detect = now;
+        }
+    }
+
+    delay(50);
+}
